@@ -361,6 +361,12 @@ type RoutingConfig struct {
 	// Default: 15m. "0" disables probing. Accepts duration strings like "10m", "1h".
 	SoonestResetProbeInterval string `yaml:"soonest-reset-probe-interval,omitempty" json:"soonest-reset-probe-interval,omitempty"`
 
+	// SpendUsageCredits controls whether the soonest-reset strategy may route to a
+	// Claude credential whose usage windows are exhausted but whose extra usage
+	// (usage credits) is enabled, which bills money instead of returning 429.
+	// Default: true. When false, such credentials are skipped.
+	SpendUsageCredits *bool `yaml:"spend-usage-credits,omitempty" json:"spend-usage-credits,omitempty"`
+
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
 	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
@@ -378,6 +384,11 @@ type RoutingConfig struct {
 	// When false, subagents are distributed across the credential pool via the fallback selector.
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
+}
+
+// SpendUsageCreditsEnabled reports whether routing may spend usage credits (default true).
+func (r RoutingConfig) SpendUsageCreditsEnabled() bool {
+	return r.SpendUsageCredits == nil || *r.SpendUsageCredits
 }
 
 // DefaultSoonestResetProbeInterval is the quota probe interval used by the

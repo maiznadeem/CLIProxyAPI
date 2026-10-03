@@ -29,6 +29,7 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
+	spendUsageCredits        bool
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -36,6 +37,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		strategy:                 "round-robin",
 		sessionAffinityTTL:       time.Hour,
 		sessionAffinitySubagents: true,
+		spendUsageCredits:        true,
 	}
 	if cfg == nil {
 		return state
@@ -49,6 +51,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	case "soonest-reset", "soonestreset", "sr":
 		state.strategy = "soonest-reset"
 	}
+	state.spendUsageCredits = cfg.Routing.SpendUsageCreditsEnabled()
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
@@ -218,6 +221,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		return false
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
+	coreauth.SetSpendUsageCredits(routingState.spendUsageCredits)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
 		s.coreManager.SetSelector(newRoutingSelector(routingState))
 		s.appliedRoutingState = &routingState

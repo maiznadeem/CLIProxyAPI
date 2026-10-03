@@ -149,7 +149,8 @@ func validQuotaSignalValue(value string) bool {
 func quotaSignalRetentionRank(name string) int {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	switch {
-	case lower == "retry-after", strings.HasPrefix(lower, "anthropic-ratelimit-unified-"):
+	case lower == "retry-after", strings.HasPrefix(lower, "anthropic-ratelimit-unified-"),
+		strings.HasPrefix(lower, "x-usage-credits-"):
 		return 0
 	case lower == "x-codex-plan-type", lower == "x-codex-active-limit", strings.HasPrefix(lower, "x-codex-credits-"):
 		return 1

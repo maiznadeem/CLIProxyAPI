@@ -228,7 +228,37 @@ func ParseClaudeUsage(body []byte) map[string]string {
 	if len(signals) == 0 {
 		return nil
 	}
+	addClaudeExtraUsage(root, signals)
 	return signals
+}
+
+// addClaudeExtraUsage records whether usage credits (extra usage) are enabled,
+// using the overage header names so routing reads one representation, plus
+// informational credit keys. Amounts are in cents.
+func addClaudeExtraUsage(root gjson.Result, signals map[string]string) {
+	extra := root.Get("extra_usage")
+	if !extra.IsObject() {
+		return
+	}
+	if enabled := extra.Get("is_enabled"); enabled.IsBool() {
+		status := "rejected"
+		if enabled.Bool() {
+			status = "allowed"
+		}
+		signals["Anthropic-Ratelimit-Unified-Overage-Status"] = status
+	}
+	if reason := strings.TrimSpace(extra.Get("disabled_reason").String()); reason != "" {
+		signals["Anthropic-Ratelimit-Unified-Overage-Disabled-Reason"] = reason
+	}
+	if used, ok := numeric(extra.Get("used_credits")); ok {
+		signals["X-Usage-Credits-Used-Cents"] = strconv.FormatInt(int64(math.Round(used)), 10)
+	}
+	if limit, ok := numeric(extra.Get("monthly_limit")); ok {
+		signals["X-Usage-Credits-Limit-Cents"] = strconv.FormatInt(int64(math.Round(limit)), 10)
+	}
+	if ever := extra.Get("credits_ever_enabled"); ever.IsBool() {
+		signals["X-Usage-Credits-Ever-Enabled"] = strconv.FormatBool(ever.Bool())
+	}
 }
 
 // ParseCodexUsage converts a /backend-api/wham/usage payload into quota signals

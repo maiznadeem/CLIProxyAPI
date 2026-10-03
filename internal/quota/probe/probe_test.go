@@ -66,6 +66,7 @@ func TestParseClaudeUsage(t *testing.T) {
 		"Anthropic-Ratelimit-Unified-7d-Status":           "rejected",
 		"Anthropic-Ratelimit-Unified-7d_opus-Utilization": "0.1",
 		"Anthropic-Ratelimit-Unified-7d_opus-Status":      "allowed",
+		"Anthropic-Ratelimit-Unified-Overage-Status":      "rejected",
 	}
 	want["Anthropic-Ratelimit-Unified-5h-Reset"] = unixString(time.Date(2027, 1, 15, 8, 0, 0, 0, time.UTC))
 	want["Anthropic-Ratelimit-Unified-7d-Reset"] = unixString(time.Date(2027, 1, 20, 0, 0, 0, 0, time.UTC))
@@ -194,4 +195,28 @@ func TestProbeAll_StopsOnCanceledContext(t *testing.T) {
 
 func unixString(t time.Time) string {
 	return strconv.FormatInt(t.Unix(), 10)
+}
+
+func TestParseClaudeUsage_ExtraUsage(t *testing.T) {
+	body := []byte(`{"five_hour":{"utilization":100,"resets_at":"2026-01-01T00:00:00Z"},"extra_usage":{"is_enabled":false,"monthly_limit":10000,"used_credits":0.0,"disabled_reason":"out_of_credits","credits_ever_enabled":true}}`)
+	signals := ParseClaudeUsage(body)
+	want := map[string]string{
+		"Anthropic-Ratelimit-Unified-Overage-Status":          "rejected",
+		"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": "out_of_credits",
+		"X-Usage-Credits-Used-Cents":                          "0",
+		"X-Usage-Credits-Limit-Cents":                         "10000",
+		"X-Usage-Credits-Ever-Enabled":                        "true",
+	}
+	for key, value := range want {
+		if signals[key] != value {
+			t.Errorf("%s = %q, want %q", key, signals[key], value)
+		}
+	}
+	enabled := ParseClaudeUsage([]byte(`{"five_hour":{"utilization":10},"extra_usage":{"is_enabled":true}}`))
+	if enabled["Anthropic-Ratelimit-Unified-Overage-Status"] != "allowed" {
+		t.Errorf("overage status = %q, want allowed", enabled["Anthropic-Ratelimit-Unified-Overage-Status"])
+	}
+	if _, ok := enabled["Anthropic-Ratelimit-Unified-Overage-Disabled-Reason"]; ok {
+		t.Error("empty disabled_reason should be omitted")
+	}
 }

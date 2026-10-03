@@ -101,7 +101,7 @@ func TestListAuthFilesCooldownsSnapshot(t *testing.T) {
 				t.Fatalf("inconsistent time basis: %+v", views[0])
 			}
 			for _, quota := range []map[string]any{file.Quota, file.ModelQuotas["model-a"]} {
-				if len(quota) != 2 || quota["signals"] == nil || quota["observed_at"] == nil {
+				if len(quota) != 4 || quota["signals"] == nil || quota["observed_at"] == nil || quota["exhausted"] != false || quota["usage_credits"] == nil {
 					t.Fatalf("quota observation changed: %+v", quota)
 				}
 			}
