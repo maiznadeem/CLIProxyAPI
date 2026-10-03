@@ -46,6 +46,8 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "soonest-reset", "soonestreset", "sr":
+		state.strategy = "soonest-reset"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -69,6 +71,8 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "soonest-reset":
+		selector = &coreauth.SoonestResetSelector{}
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
@@ -224,6 +228,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		return false
 	}
 	s.coreManager.SetOAuthModelAlias(commit.cfg.OAuthModelAlias)
+	s.syncQuotaProbe(commit.cfg)
 	return true
 }
 

@@ -351,8 +351,15 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first",
+	// "soonest-reset" (prefer the credential whose quota window resets soonest).
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// SoonestResetProbeInterval controls how often Claude and Codex OAuth credentials are
+	// probed for quota reset times while the soonest-reset strategy is active, so cold
+	// credentials have reset information before serving traffic.
+	// Default: 15m. "0" disables probing. Accepts duration strings like "10m", "1h".
+	SoonestResetProbeInterval string `yaml:"soonest-reset-probe-interval,omitempty" json:"soonest-reset-probe-interval,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
@@ -371,6 +378,30 @@ type RoutingConfig struct {
 	// When false, subagents are distributed across the credential pool via the fallback selector.
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
+}
+
+// DefaultSoonestResetProbeInterval is the quota probe interval used by the
+// soonest-reset routing strategy when none is configured.
+const DefaultSoonestResetProbeInterval = 15 * time.Minute
+
+// SoonestResetProbeIntervalDuration returns the effective quota probe interval.
+// It returns 0 when probing is disabled; invalid or empty values use the default.
+func (r RoutingConfig) SoonestResetProbeIntervalDuration() time.Duration {
+	raw := strings.TrimSpace(r.SoonestResetProbeInterval)
+	if raw == "" {
+		return DefaultSoonestResetProbeInterval
+	}
+	if raw == "0" {
+		return 0
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed < 0 {
+		return DefaultSoonestResetProbeInterval
+	}
+	if parsed > 0 && parsed < time.Minute {
+		parsed = time.Minute
+	}
+	return parsed
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

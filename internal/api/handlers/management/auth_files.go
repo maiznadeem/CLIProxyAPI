@@ -815,6 +815,10 @@ func quotaObservationPayload(quota coreauth.QuotaState) gin.H {
 		signals[key] = value
 	}
 	observed["signals"] = signals
+	// reset_at is the instant the soonest-reset strategy routes by.
+	if resetAt, ok := coreauth.QuotaResetInstant(&coreauth.Auth{Quota: quota}, time.Now()); ok {
+		observed["reset_at"] = resetAt
+	}
 	return observed
 }
 

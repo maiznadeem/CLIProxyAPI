@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"context"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -73,5 +74,50 @@ func TestApplyManagerConfigStopsReplacedServiceAffinitySelector(t *testing.T) {
 
 	if !tracking.stopped {
 		t.Fatal("expected replaced selector to be stopped during routing config apply")
+	}
+}
+
+func TestSoonestResetRoutingSelector(t *testing.T) {
+	for _, input := range []string{"soonest-reset", "sr", "SoonestReset"} {
+		state := normalizedRoutingRuntimeState(&internalconfig.Config{
+			Routing: internalconfig.RoutingConfig{Strategy: input},
+		})
+		if state.strategy != "soonest-reset" {
+			t.Fatalf("strategy(%q) = %q, want soonest-reset", input, state.strategy)
+		}
+		if selector, ok := newRoutingSelector(state).(*coreauth.SoonestResetSelector); !ok {
+			t.Fatalf("selector type = %T, want *auth.SoonestResetSelector", selector)
+		}
+	}
+	state := normalizedRoutingRuntimeState(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{Strategy: "sr", SessionAffinity: true},
+	})
+	selector := newRoutingSelector(state)
+	affinity, ok := selector.(*coreauth.SessionAffinitySelector)
+	if !ok {
+		t.Fatalf("selector type = %T, want *auth.SessionAffinitySelector", selector)
+	}
+	affinity.Stop()
+}
+
+func TestQuotaProbeIntervalFor(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *internalconfig.Config
+		want time.Duration
+	}{
+		{"nil", nil, 0},
+		{"other strategy", &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "fill-first"}}, 0},
+		{"default", &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "soonest-reset"}}, 15 * time.Minute},
+		{"custom", &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "sr", SoonestResetProbeInterval: "5m"}}, 5 * time.Minute},
+		{"disabled", &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "sr", SoonestResetProbeInterval: "0"}}, 0},
+		{"disabled 0s", &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "sr", SoonestResetProbeInterval: "0s"}}, 0},
+		{"clamped", &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "sr", SoonestResetProbeInterval: "5s"}}, time.Minute},
+		{"invalid", &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "sr", SoonestResetProbeInterval: "soon"}}, 15 * time.Minute},
+	}
+	for _, tc := range cases {
+		if got := quotaProbeIntervalFor(tc.cfg); got != tc.want {
+			t.Fatalf("%s: quotaProbeIntervalFor = %s, want %s", tc.name, got, tc.want)
+		}
 	}
 }

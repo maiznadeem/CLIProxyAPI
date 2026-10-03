@@ -72,6 +72,17 @@ func isBuiltInSelector(selector Selector) bool {
 	}
 }
 
+// usesPrevalidatedCandidates reports whether a selector accepts the manager's
+// already resolved candidates and applies built-in availability semantics.
+// SoonestResetSelector qualifies but is not scheduler-backed, so it stays off
+// the scheduler fast path and is picked through the legacy selector path.
+func usesPrevalidatedCandidates(selector Selector) bool {
+	if _, ok := selector.(*SoonestResetSelector); ok {
+		return true
+	}
+	return isBuiltInSelector(selector)
+}
+
 type requiredAuthKindContextKey struct{}
 type credentialPolicyContextKey struct{}
 
@@ -653,7 +664,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
-	if isBuiltInSelector(selector) {
+	if usesPrevalidatedCandidates(selector) {
 		return ""
 	}
 	return routeModel
@@ -661,7 +672,7 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 
 func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
-	if !isBuiltInSelector(selector) {
+	if !usesPrevalidatedCandidates(selector) {
 		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
 			return ctx
 		}
@@ -1790,7 +1801,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
-			if isBuiltInSelector(selector) {
+			if usesPrevalidatedCandidates(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)
 			}
 			m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
@@ -2124,7 +2135,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
-			if isBuiltInSelector(selector) {
+			if usesPrevalidatedCandidates(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)
 			}
 			m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)
