@@ -22,7 +22,7 @@ import (
 
 const (
 	// FileName is the ledger file stored inside the auth directory.
-	FileName = "usage-stats.json"
+	FileName = "usage-stats.ledger"
 	// DefaultRetention is how long entries are kept when no retention is configured.
 	DefaultRetention = 30 * 24 * time.Hour
 	// MaxEntries caps the in-memory ledger size.
@@ -135,9 +135,9 @@ func ledgerPath(authDir string) string {
 		return ""
 	}
 	// Keep the ledger out of the auth directory root: the credential watcher
-	// treats every top-level *.json there as an auth file.
+	// loads every *.json under it (recursively) as an auth file, so use a non-JSON extension.
 	path := filepath.Join(dir, "usage", FileName)
-	if legacy := filepath.Join(dir, FileName); legacy != path {
+	for _, legacy := range []string{filepath.Join(dir, "usage-stats.json"), filepath.Join(dir, "usage", "usage-stats.json")} {
 		if _, err := os.Stat(legacy); err == nil {
 			if _, err := os.Stat(path); os.IsNotExist(err) {
 				_ = os.MkdirAll(filepath.Dir(path), 0o700)
