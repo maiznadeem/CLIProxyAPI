@@ -134,7 +134,18 @@ func ledgerPath(authDir string) string {
 	if dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, FileName)
+	// Keep the ledger out of the auth directory root: the credential watcher
+	// treats every top-level *.json there as an auth file.
+	path := filepath.Join(dir, "usage", FileName)
+	if legacy := filepath.Join(dir, FileName); legacy != path {
+		if _, err := os.Stat(legacy); err == nil {
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				_ = os.MkdirAll(filepath.Dir(path), 0o700)
+				_ = os.Rename(legacy, path)
+			}
+		}
+	}
+	return path
 }
 
 // Path returns the persistence file path ("" when not persisted).
