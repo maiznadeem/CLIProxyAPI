@@ -437,6 +437,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 					}
 				}
 			}
+			fileData[coreauth.AttributeRoutingMode] = coreauth.NormalizeRoutingMode(gjson.GetBytes(data, coreauth.AttributeRoutingMode).String())
 			if wv := gjson.GetBytes(data, coreauth.AttributeWeight); wv.Exists() {
 				var rawWeight string
 				switch wv.Type {
@@ -764,6 +765,15 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 			}
 		}
 	}
+	// Expose routing_mode from Attributes (set by synthesizer from JSON "routing_mode" field).
+	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
+	routingMode := coreauth.RoutingMode(auth)
+	if routingMode == coreauth.RoutingModeNormal && auth.Metadata != nil {
+		if rawMode, ok := auth.Metadata[coreauth.AttributeRoutingMode].(string); ok {
+			routingMode = coreauth.NormalizeRoutingMode(rawMode)
+		}
+	}
+	entry[coreauth.AttributeRoutingMode] = routingMode
 	// Expose note from Attributes (set by synthesizer from JSON "note" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if note := strings.TrimSpace(authAttribute(auth, "note")); note != "" {

@@ -563,6 +563,7 @@ func (m *Manager) availableAuthsForRouteModelAcrossPriorities(auths []*Auth, pro
 }
 
 func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, provider, routeModel string, now time.Time, allPriorities bool) ([]*Auth, error) {
+	auths = excludePreservedAuths(auths)
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -571,12 +572,12 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 	cooldownCount := 0
 	unauthorizedCount := 0
 	var earliest time.Time
+	unblocked := make([]*Auth, 0, len(auths))
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
 		if !blocked {
-			priority := authPriority(candidate)
-			availableByPriority[priority] = append(availableByPriority[priority], candidate)
+			unblocked = append(unblocked, candidate)
 			continue
 		}
 		if reason == blockReasonCooldown {
@@ -588,6 +589,11 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		if hasUnauthorizedAuthFailure(candidate) {
 			unauthorizedCount++
 		}
+	}
+	// Focus applies to available credentials only, so an unavailable focused credential never causes an outage.
+	for _, candidate := range restrictToFocusedAuths(unblocked) {
+		priority := authPriority(candidate)
+		availableByPriority[priority] = append(availableByPriority[priority], candidate)
 	}
 
 	if len(availableByPriority) == 0 {
