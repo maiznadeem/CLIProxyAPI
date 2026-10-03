@@ -1320,11 +1320,15 @@ func selectorLogEntry(ctx context.Context) *log.Entry {
 }
 
 // truncateSessionID shortens session ID for logging (first 8 chars + "...")
+// truncateSessionID keeps enough of a session key to group log lines by thread.
+// Keys look like "claude:<uuid>" or "lcp:v1:<hash>", so an 8-character cut used to
+// leave a single character of the identifier. 28 characters keeps the prefix plus
+// ~21 characters of the id, which is unique in practice and still readable.
 func truncateSessionID(id string) string {
-	if len(id) <= 20 {
+	if len(id) <= 32 {
 		return id
 	}
-	return id[:8] + "..."
+	return id[:28] + "..."
 }
 
 // Stop releases resources held by the selector.
