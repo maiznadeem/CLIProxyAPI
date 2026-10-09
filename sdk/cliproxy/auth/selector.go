@@ -468,12 +468,12 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
+	unblocked := make([]*Auth, 0, len(auths))
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			priority := authPriority(candidate)
-			available[priority] = append(available[priority], candidate)
+			unblocked = append(unblocked, candidate)
 			continue
 		}
 		if reason == blockReasonCooldown {
@@ -482,6 +482,11 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
 		}
+	}
+	// Focus applies to available credentials only, so an unavailable focused credential never causes an outage.
+	for _, candidate := range restrictToFocusedAuths(unblocked) {
+		priority := authPriority(candidate)
+		available[priority] = append(available[priority], candidate)
 	}
 	return available, cooldownCount, earliest
 }
@@ -507,6 +512,10 @@ func getSelectorAvailableAuthsWithPriorityMode(ctx context.Context, auths []*Aut
 			// ID-sorted candidates. Rechecking the alias or an empty model would apply
 			// unrelated cooldowns. Affinity bindings may span all priority tiers, but
 			// fallback selection must still use the highest available tier.
+			auths = applyRoutingModes(auths)
+			if len(auths) == 0 {
+				return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+			}
 			if !allPriorities {
 				return highestPriorityAuths(auths), nil
 			}
@@ -521,6 +530,7 @@ func getAvailableAuthsAcrossPriorities(auths []*Auth, provider, model string, no
 }
 
 func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, now time.Time, allPriorities bool) ([]*Auth, error) {
+	auths = excludePreservedAuths(auths)
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -1073,6 +1083,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, nil
 		}
 		bind(auth.ID)
+		if RoutingMode(auth) == RoutingModeFocus {
+			entry.Debugf("session %s moved to focused credential %s", truncateSessionID(primaryID), auth.ID)
+		}
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
 	}
@@ -1320,11 +1333,15 @@ func selectorLogEntry(ctx context.Context) *log.Entry {
 }
 
 // truncateSessionID shortens session ID for logging (first 8 chars + "...")
+// truncateSessionID keeps enough of a session key to group log lines by thread.
+// Keys look like "claude:<uuid>" or "lcp:v1:<hash>", so an 8-character cut used to
+// leave a single character of the identifier. 28 characters keeps the prefix plus
+// ~21 characters of the id, which is unique in practice and still readable.
 func truncateSessionID(id string) string {
-	if len(id) <= 20 {
+	if len(id) <= 32 {
 		return id
 	}
-	return id[:8] + "..."
+	return id[:28] + "..."
 }
 
 // Stop releases resources held by the selector.

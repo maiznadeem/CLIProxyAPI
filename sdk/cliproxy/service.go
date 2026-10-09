@@ -45,6 +45,11 @@ type Service struct {
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
 
+	// quotaProbeMu guards the soonest-reset quota probe loop state.
+	quotaProbeMu   sync.Mutex
+	quotaProbeBase context.Context
+	quotaProbe     *quotaProbeLoop
+
 	// configPath is the path to the configuration file.
 	configPath string
 

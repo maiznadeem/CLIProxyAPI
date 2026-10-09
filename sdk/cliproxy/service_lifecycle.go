@@ -91,6 +91,11 @@ func (s *Service) Run(ctx context.Context) error {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+
+		s.quotaProbeMu.Lock()
+		s.quotaProbeBase = ctx
+		s.quotaProbeMu.Unlock()
+		s.syncQuotaProbe(s.cfg)
 	}
 
 	if !homeEnabled {
@@ -289,6 +294,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
 		}
+		s.stopQuotaProbe()
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {
 				log.Errorf("failed to stop file watcher: %v", err)

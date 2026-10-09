@@ -437,6 +437,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 					}
 				}
 			}
+			fileData[coreauth.AttributeRoutingMode] = coreauth.NormalizeRoutingMode(gjson.GetBytes(data, coreauth.AttributeRoutingMode).String())
 			if wv := gjson.GetBytes(data, coreauth.AttributeWeight); wv.Exists() {
 				var rawWeight string
 				switch wv.Type {
@@ -764,6 +765,15 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 			}
 		}
 	}
+	// Expose routing_mode from Attributes (set by synthesizer from JSON "routing_mode" field).
+	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
+	routingMode := coreauth.RoutingMode(auth)
+	if routingMode == coreauth.RoutingModeNormal && auth.Metadata != nil {
+		if rawMode, ok := auth.Metadata[coreauth.AttributeRoutingMode].(string); ok {
+			routingMode = coreauth.NormalizeRoutingMode(rawMode)
+		}
+	}
+	entry[coreauth.AttributeRoutingMode] = routingMode
 	// Expose note from Attributes (set by synthesizer from JSON "note" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if note := strings.TrimSpace(authAttribute(auth, "note")); note != "" {
@@ -815,6 +825,34 @@ func quotaObservationPayload(quota coreauth.QuotaState) gin.H {
 		signals[key] = value
 	}
 	observed["signals"] = signals
+	// reset_at is the instant the soonest-reset strategy routes by.
+	if resetAt, ok := coreauth.QuotaResetInstant(&coreauth.Auth{Quota: quota}, time.Now()); ok {
+		observed["reset_at"] = resetAt
+	}
+	if len(signals) > 0 {
+		probe := &coreauth.Auth{Quota: quota}
+		observed["exhausted"] = coreauth.QuotaExhausted(probe)
+		credits := coreauth.QuotaUsageCredits(probe)
+		observed["usage_credits"] = gin.H{
+			"enabled":      credits.Enabled,
+			"known":        credits.Known,
+			"reason":       credits.Reason,
+			"used_cents":   credits.UsedCents,
+			"limit_cents":  credits.LimitCents,
+			"ever_enabled": credits.EverEnabled,
+		}
+		windows := gin.H{}
+		fiveHour, fiveHourOK, sevenDay, sevenDayOK := coreauth.QuotaWindowPercents(probe)
+		if fiveHourOK {
+			windows["five_hour_pct"] = fiveHour
+		}
+		if sevenDayOK {
+			windows["seven_day_pct"] = sevenDay
+		}
+		if len(windows) > 0 {
+			observed["windows"] = windows
+		}
+	}
 	return observed
 }
 

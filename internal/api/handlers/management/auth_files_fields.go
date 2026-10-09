@@ -363,6 +363,14 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "weight does not support nested fields"})
 			return
+		} else if fieldPath == coreauth.AttributeRoutingMode {
+			if errMode := applyAuthFileRoutingModePatch(targetAuth.Metadata, value); errMode != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errMode.Error()})
+				return
+			}
+		} else if rootAuthFileField(fieldPath) == coreauth.AttributeRoutingMode {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "routing_mode does not support nested fields"})
+			return
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
@@ -623,6 +631,9 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots[coreauth.AttributeWeight]; ok {
 		syncAuthFileWeightAttribute(auth)
 	}
+	if _, ok := touchedRoots[coreauth.AttributeRoutingMode]; ok {
+		syncAuthFileRoutingModeAttribute(auth)
+	}
 	if _, ok := touchedRoots["note"]; ok {
 		syncAuthFileNoteAttribute(auth)
 	}
@@ -706,6 +717,42 @@ func syncAuthFilePriorityAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["priority"] = strconv.Itoa(priority)
+}
+
+// applyAuthFileRoutingModePatch validates a routing_mode patch value and stores it in metadata.
+// "normal" or null removes the field.
+func applyAuthFileRoutingModePatch(metadata map[string]any, value any) error {
+	if value == nil {
+		delete(metadata, coreauth.AttributeRoutingMode)
+		return nil
+	}
+	raw, ok := value.(string)
+	if !ok || !coreauth.IsValidRoutingMode(raw) {
+		return fmt.Errorf("routing_mode must be one of: %s, %s, %s", coreauth.RoutingModeNormal, coreauth.RoutingModePreserve, coreauth.RoutingModeFocus)
+	}
+	mode := coreauth.NormalizeRoutingMode(raw)
+	if mode == coreauth.RoutingModeNormal {
+		delete(metadata, coreauth.AttributeRoutingMode)
+		return nil
+	}
+	metadata[coreauth.AttributeRoutingMode] = mode
+	return nil
+}
+
+func syncAuthFileRoutingModeAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	raw, _ := auth.Metadata[coreauth.AttributeRoutingMode].(string)
+	mode := coreauth.NormalizeRoutingMode(raw)
+	if mode == coreauth.RoutingModeNormal {
+		delete(auth.Attributes, coreauth.AttributeRoutingMode)
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes[coreauth.AttributeRoutingMode] = mode
 }
 
 func syncAuthFileWeightAttribute(auth *coreauth.Auth) {

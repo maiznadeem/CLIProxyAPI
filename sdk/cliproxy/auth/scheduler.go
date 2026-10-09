@@ -64,6 +64,7 @@ type scheduledAuthMeta struct {
 	auth              *Auth
 	providerKey       string
 	priority          int
+	routingMode       string
 	weight            int64
 	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
@@ -77,6 +78,8 @@ type modelScheduler struct {
 	priorityOrder   []int
 	readyByPriority map[int]*readyBucket
 	blocked         cooldownQueue
+	// focusReady is true when at least one ready entry is in focus routing mode.
+	focusReady bool
 }
 
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
@@ -494,24 +497,40 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	bestPriority := 0
 	hasCandidate := false
 	now := time.Now()
+	anyFocusReady := false
 	for providerIndex, providerKey := range normalized {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
 			continue
 		}
-		shard := providerState.ensureModelLocked(modelKey, now)
-		candidateShards[providerIndex] = shard
-		if shard == nil {
-			continue
+		candidateShards[providerIndex] = providerState.ensureModelLocked(modelKey, now)
+		if shard := candidateShards[providerIndex]; shard != nil && shard.focusReady {
+			anyFocusReady = true
 		}
-		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
-		if !okPriority {
-			continue
+	}
+	scanBestPriority := func(pred func(*scheduledAuth) bool) (int, bool) {
+		best, found := 0, false
+		for _, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			priorityReady, okPriority := shard.highestReadyPriorityLocked(false, pred)
+			if okPriority && (!found || priorityReady > best) {
+				best, found = priorityReady, true
+			}
 		}
-		if !hasCandidate || priorityReady > bestPriority {
-			bestPriority = priorityReady
-			hasCandidate = true
+		return best, found
+	}
+	if anyFocusReady {
+		// Focus restricts selection to focused credentials; it falls back to the normal set when none match.
+		focused := focusedPredicate(predicate)
+		if focusedPriority, okFocused := scanBestPriority(focused); okFocused {
+			predicate = focused
+			bestPriority, hasCandidate = focusedPriority, true
 		}
+	}
+	if !hasCandidate {
+		bestPriority, hasCandidate = scanBestPriority(predicate)
 	}
 	if !hasCandidate {
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
@@ -710,6 +729,9 @@ func scheduledAuthPredicate(eligibility authSelectionEligibility, tried map[stri
 		if entry == nil || entry.auth == nil || !eligibility.allows(entry.auth) {
 			return false
 		}
+		if entry.meta != nil && entry.meta.routingMode == RoutingModePreserve {
+			return false
+		}
 		if requirePositiveWeight && (entry.meta == nil || entry.meta.weight <= 0) {
 			return false
 		}
@@ -722,6 +744,13 @@ func scheduledAuthPredicate(eligibility authSelectionEligibility, tried map[stri
 			}
 		}
 		return true
+	}
+}
+
+// focusedPredicate narrows a scheduler predicate to credentials in focus routing mode.
+func focusedPredicate(base func(*scheduledAuth) bool) func(*scheduledAuth) bool {
+	return func(entry *scheduledAuth) bool {
+		return entry != nil && entry.meta != nil && entry.meta.routingMode == RoutingModeFocus && base(entry)
 	}
 }
 
@@ -1044,11 +1073,15 @@ func buildScheduledAuthMetaWithModelSet(auth *Auth, modelSet map[string]struct{}
 	var clonedAuth *Auth
 	if auth != nil {
 		clonedAuth = auth.Clone()
+		if RoutingMode(auth) == RoutingModePreserve {
+			logPreservedSkip(auth)
+		}
 	}
 	return &scheduledAuthMeta{
 		auth:              clonedAuth,
 		providerKey:       providerKey,
 		priority:          authPriority(auth),
+		routingMode:       RoutingMode(auth),
 		weight:            authWeight(auth),
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: modelSet,
@@ -1206,9 +1239,11 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	previousState := entry.state
 	previousNextRetryAt := entry.nextRetryAt
 	previousPriority := 0
+	previousRoutingMode := RoutingModeNormal
 	previousWebsocketEnabled := false
 	if entry.meta != nil {
 		previousPriority = entry.meta.priority
+		previousRoutingMode = entry.meta.routingMode
 		previousWebsocketEnabled = entry.meta.websocketEnabled
 	}
 
@@ -1229,7 +1264,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 		entry.nextRetryAt = next
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousWebsocketEnabled == meta.websocketEnabled {
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousRoutingMode == meta.routingMode && previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -1320,6 +1355,13 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 		return nil
 	}
 	m.promoteExpiredLocked(time.Now())
+	if m.focusReady && predicate != nil {
+		// Focus restricts selection to focused credentials; it falls back to the normal set when none match.
+		focused := focusedPredicate(predicate)
+		if priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, focused); okPriority {
+			return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, focused)
+		}
+	}
 	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, predicate)
 	if !okPriority {
 		return nil
@@ -1568,12 +1610,16 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 	m.priorityOrder = m.priorityOrder[:0]
 	m.blocked = m.blocked[:0]
 	priorityBuckets := make(map[int][]*scheduledAuth)
+	m.focusReady = false
 	for _, entry := range m.entries {
 		if entry == nil || entry.auth == nil {
 			continue
 		}
 		switch entry.state {
 		case scheduledStateReady:
+			if entry.meta.routingMode == RoutingModeFocus {
+				m.focusReady = true
+			}
 			priority := entry.meta.priority
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
 		case scheduledStateCooldown, scheduledStateBlocked:

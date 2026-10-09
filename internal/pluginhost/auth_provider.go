@@ -435,6 +435,16 @@ func preserveFileAuthPriority(data *pluginapi.AuthData, auth *coreauth.Auth) {
 			data.Attributes[key] = value
 		}
 	}
+	if mode, ok := auth.Attributes[coreauth.AttributeRoutingMode]; ok {
+		data.Attributes[coreauth.AttributeRoutingMode] = mode
+		if data.Metadata == nil {
+			data.Metadata = make(map[string]any)
+		}
+		data.Metadata[coreauth.AttributeRoutingMode] = auth.Metadata[coreauth.AttributeRoutingMode]
+	} else {
+		delete(data.Attributes, coreauth.AttributeRoutingMode)
+		delete(data.Metadata, coreauth.AttributeRoutingMode)
+	}
 	if auth.Attributes[coreauth.AttributeFilePriority] != "true" {
 		delete(data.Attributes, coreauth.AttributeFilePriority)
 		return

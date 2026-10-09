@@ -35,6 +35,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/usagestats"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -645,6 +646,10 @@ func main() {
 		return
 	} else {
 		cfg.AuthDir = resolvedAuthDir
+	}
+	// The persistent usage ledger is independent of usage-statistics-enabled (which gates the redis queue only).
+	if usageLedger := usagestats.Init(cfg.AuthDir, cfg.UsageStatsRetentionDays); usageLedger != nil {
+		defer usageLedger.Stop()
 	}
 	managementasset.SetCurrentConfig(cfg)
 
