@@ -110,7 +110,7 @@ func (p *Prober) ProbeAll(ctx context.Context, auths []*coreauth.Auth, sink Sink
 		signals, observedAt, err := p.Probe(ctx, auth)
 		if err != nil {
 			summary.Failed++
-			log.WithFields(log.Fields{"auth_id": auth.ID, "provider": auth.Provider}).Debugf("quota probe failed: %v", err)
+			log.WithFields(log.Fields{"auth_id": auth.ID, "provider": auth.Provider}).Warnf("quota probe failed: %v", err)
 			continue
 		}
 		if sink != nil && sink.ApplyQuotaProbeSignals(auth.ID, signals, observedAt) {
