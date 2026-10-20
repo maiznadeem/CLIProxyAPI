@@ -66,7 +66,7 @@ func TestPatchAuthFileFields_RoutingModeValidationPersistAndExposure(t *testing.
 		if !ok {
 			t.Fatal("auth missing")
 		}
-		return h.buildAuthFileEntry(updated)["routing_mode"]
+		return h.buildAuthFileEntry(updated, authFileQuotaContext{})["routing_mode"]
 	}
 
 	for _, invalid := range []string{`"bogus"`, `5`, `true`, `{"a":1}`} {
@@ -152,7 +152,7 @@ func TestBuildAuthFileEntry_ExposesRoutingModeFromAttributesOrMetadata(t *testin
 	fromMeta := &coreauth.Auth{ID: "b.json", FileName: "b.json", Provider: "codex", Attributes: map[string]string{"path": pathFor("b.json")}, Metadata: map[string]any{"routing_mode": "Preserve"}}
 	plain := &coreauth.Auth{ID: "c.json", FileName: "c.json", Provider: "codex", Attributes: map[string]string{"path": pathFor("c.json")}}
 	for auth, want := range map[*coreauth.Auth]string{fromAttr: "focus", fromMeta: "preserve", plain: "normal"} {
-		if got := h.buildAuthFileEntry(auth)["routing_mode"]; got != want {
+		if got := h.buildAuthFileEntry(auth, authFileQuotaContext{})["routing_mode"]; got != want {
 			t.Fatalf("%s routing_mode = %v, want %s", auth.ID, got, want)
 		}
 	}
