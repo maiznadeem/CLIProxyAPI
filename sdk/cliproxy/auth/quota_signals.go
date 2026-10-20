@@ -149,7 +149,8 @@ func validQuotaSignalValue(value string) bool {
 func quotaSignalRetentionRank(name string) int {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	switch {
-	case lower == "retry-after", strings.HasPrefix(lower, "anthropic-ratelimit-unified-"):
+	case lower == "retry-after", strings.HasPrefix(lower, "anthropic-ratelimit-unified-"),
+		strings.HasPrefix(lower, "x-usage-credits-"):
 		return 0
 	case lower == "x-codex-plan-type", lower == "x-codex-active-limit", strings.HasPrefix(lower, "x-codex-credits-"):
 		return 1
@@ -224,4 +225,39 @@ func mergeQuotaObservation(target, source QuotaState) QuotaState {
 	target.ObservedAt = source.ObservedAt
 	target.Signals = source.Clone().Signals
 	return target
+}
+
+// ApplyQuotaProbeSignals replaces a credential's passive quota snapshot with
+// signals gathered by an active quota probe. The snapshot is only replaced when
+// observedAt is not older than the current one, so a slow probe can never
+// overwrite fresher response-header observations. Cooldown and scheduling
+// fields are left untouched. It reports whether the snapshot changed.
+func (m *Manager) ApplyQuotaProbeSignals(authID string, signals map[string]string, observedAt time.Time) bool {
+	if m == nil || authID == "" || len(signals) == 0 {
+		return false
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+	next := make(map[string]string, len(signals))
+	for key, value := range signals {
+		key = http.CanonicalHeaderKey(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+		if key == "" || !validQuotaSignalValue(value) || len(next) >= maxQuotaSignalHeaders {
+			continue
+		}
+		next[key] = value
+	}
+	if len(next) == 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	auth := m.auths[authID]
+	if auth == nil || observedAt.Before(auth.Quota.ObservedAt) {
+		return false
+	}
+	auth.Quota.Signals = next
+	auth.Quota.ObservedAt = observedAt
+	return true
 }

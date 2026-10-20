@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -64,5 +65,31 @@ func TestQuotaObservationPayloadExcludesCooldownState(t *testing.T) {
 	}
 	if _, ok := payload["backoff_level"]; ok {
 		t.Fatalf("cooldown backoff leaked: %#v", payload)
+	}
+}
+
+func TestQuotaObservationPayloadUsageCredits(t *testing.T) {
+	payload := quotaObservationPayload(coreauth.QuotaState{
+		ObservedAt: time.Unix(10, 0),
+		Signals: map[string]string{
+			"Anthropic-Ratelimit-Unified-5h-Utilization":          "1",
+			"Anthropic-Ratelimit-Unified-7d-Utilization":          "0.25",
+			"Anthropic-Ratelimit-Unified-Overage-Status":          "allowed",
+			"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": "",
+			"X-Usage-Credits-Used-Cents":                          "120",
+			"X-Usage-Credits-Limit-Cents":                         "10000",
+			"X-Usage-Credits-Ever-Enabled":                        "true",
+		},
+	})
+	if payload["exhausted"] != true {
+		t.Fatalf("exhausted = %v, want true", payload["exhausted"])
+	}
+	credits, ok := payload["usage_credits"].(gin.H)
+	if !ok || credits["enabled"] != true || credits["known"] != true || credits["used_cents"] != int64(120) || credits["limit_cents"] != int64(10000) || credits["ever_enabled"] != true {
+		t.Fatalf("usage_credits = %#v", payload["usage_credits"])
+	}
+	windows, ok := payload["windows"].(gin.H)
+	if !ok || windows["five_hour_pct"] != float64(100) || windows["seven_day_pct"] != float64(25) {
+		t.Fatalf("windows = %#v", payload["windows"])
 	}
 }

@@ -79,6 +79,17 @@ func isBuiltInSelector(selector Selector) bool {
 	}
 }
 
+// usesPrevalidatedCandidates reports whether a selector accepts the manager's
+// already resolved candidates and applies built-in availability semantics.
+// SoonestResetSelector qualifies but is not scheduler-backed, so it stays off
+// the scheduler fast path and is picked through the legacy selector path.
+func usesPrevalidatedCandidates(selector Selector) bool {
+	if _, ok := selector.(*SoonestResetSelector); ok {
+		return true
+	}
+	return isBuiltInSelector(selector)
+}
+
 type requiredAuthKindContextKey struct{}
 type credentialPolicyContextKey struct{}
 
@@ -562,6 +573,7 @@ func (m *Manager) availableAuthsForRouteModelAcrossPriorities(auths []*Auth, pro
 }
 
 func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, provider, routeModel string, now time.Time, allPriorities bool) ([]*Auth, error) {
+	auths = excludePreservedAuths(auths)
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -570,12 +582,12 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 	cooldownCount := 0
 	unauthorizedCount := 0
 	var earliest time.Time
+	unblocked := make([]*Auth, 0, len(auths))
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
 		if !blocked {
-			priority := authPriority(candidate)
-			availableByPriority[priority] = append(availableByPriority[priority], candidate)
+			unblocked = append(unblocked, candidate)
 			continue
 		}
 		if reason == blockReasonCooldown {
@@ -587,6 +599,11 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		if hasUnauthorizedAuthFailure(candidate) {
 			unauthorizedCount++
 		}
+	}
+	// Focus applies to available credentials only, so an unavailable focused credential never causes an outage.
+	for _, candidate := range restrictToFocusedAuths(unblocked) {
+		priority := authPriority(candidate)
+		availableByPriority[priority] = append(availableByPriority[priority], candidate)
 	}
 
 	if len(availableByPriority) == 0 {
@@ -662,7 +679,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
-	if isBuiltInSelector(selector) {
+	if usesPrevalidatedCandidates(selector) {
 		return ""
 	}
 	return routeModel
@@ -670,7 +687,7 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 
 func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
-	if !isBuiltInSelector(selector) {
+	if !usesPrevalidatedCandidates(selector) {
 		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
 			return ctx
 		}
@@ -1898,7 +1915,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
-			if isBuiltInSelector(selector) {
+			if usesPrevalidatedCandidates(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)
 			}
 			m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
@@ -2244,7 +2261,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
-			if isBuiltInSelector(selector) {
+			if usesPrevalidatedCandidates(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)
 			}
 			m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)
