@@ -19,7 +19,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
+	gjson "github.com/MoeForge/moego/ojson"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
