@@ -25,8 +25,8 @@ import (
 // again by soonest reset. When SetSpendUsageCredits(false) is in effect,
 // exhausted credentials with usage credits enabled are not picked at all.
 //
-// When session affinity wraps this selector, an established binding still
-// outranks this ordering; this selector only decides cold and failover picks.
+// With default session rebinding, Claude sessions follow the highest-ranked
+// known quota window and retain affinity within that tier.
 type SoonestResetSelector struct {
 	// now overrides the clock in tests.
 	now func() time.Time
@@ -35,10 +35,7 @@ type SoonestResetSelector struct {
 // Pick selects the available credential with the soonest known quota reset.
 func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
-	now := time.Now()
-	if s != nil && s.now != nil {
-		now = s.now()
-	}
+	now := s.selectionTime()
 	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
 	if err != nil {
 		return nil, err
@@ -61,6 +58,43 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 		log.Debugf("routing to %s on usage credits", picked.ID)
 	}
 	return picked, nil
+}
+
+func (s *SoonestResetSelector) selectionTime() time.Time {
+	if s != nil && s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// preferredClaudeAffinityCandidates applies reset ordering before a Claude
+// session-cache lookup. A later-reset credential remains available for retry
+// when the conductor removes the failed credential from the candidate list.
+func (s *SoonestResetSelector) preferredClaudeAffinityCandidates(ctx context.Context, provider, model string, auths []*Auth) []*Auth {
+	if len(auths) < 2 || (provider != "claude" && provider != "mixed") {
+		return nil
+	}
+	for _, auth := range auths {
+		if auth == nil || auth.Provider != "claude" {
+			return nil
+		}
+	}
+	now := s.selectionTime()
+	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
+	if err != nil || len(available) == 0 {
+		return nil
+	}
+	ordered := orderBySoonestReset(available, now)
+	resetAt, known := QuotaResetInstant(ordered[0], now)
+	if !known || quotaExhaustedAt(ordered[0], now) {
+		return nil
+	}
+	for i, auth := range ordered {
+		if reset, ok := QuotaResetInstant(auth, now); !ok || !reset.Equal(resetAt) || quotaExhaustedAt(auth, now) {
+			return ordered[:i]
+		}
+	}
+	return ordered
 }
 
 // orderBySoonestReset returns a copy of auths in soonest-reset order.

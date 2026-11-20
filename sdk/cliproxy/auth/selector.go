@@ -1132,6 +1132,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, errContext
 	}
+	if selector, ok := s.fallback.(*SoonestResetSelector); ok && !s.rebindOnNever && !s.rebindOnQuotaOnly {
+		if preferred := selector.preferredClaudeAffinityCandidates(ctx, provider, model, auths); len(preferred) != 0 {
+			auths = preferred
+			ctx = context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
+		}
+	}
 	var reservation *weightedReservation
 	// Local bindings complete inside Pick; failed selections release speculative credit.
 	defer func() { reservation.finish(selected != nil && errPick == nil) }()

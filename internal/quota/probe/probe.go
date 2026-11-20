@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	log "github.com/sirupsen/logrus"
 	gjson "github.com/MoeForge/moego/ojson"
+	log "github.com/sirupsen/logrus"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -160,6 +160,8 @@ func (p *Prober) Probe(ctx context.Context, auth *coreauth.Auth) (map[string]str
 			client = c
 		}
 	}
+	// A probe that was already in flight must not override a newer response.
+	observedAt := p.now()
 	resp, errDo := client.Do(req)
 	if errDo != nil {
 		return nil, time.Time{}, fmt.Errorf("request: %w", errDo)
@@ -177,7 +179,6 @@ func (p *Prober) Probe(ctx context.Context, auth *coreauth.Auth) (map[string]str
 		return nil, time.Time{}, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	observedAt := p.now()
 	var signals map[string]string
 	if isClaude {
 		signals = ParseClaudeUsage(body)

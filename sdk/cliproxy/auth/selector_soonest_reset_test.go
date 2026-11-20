@@ -2,12 +2,97 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+func TestSoonestResetClaudeSessionMovesWhenEarlierAccountRecovers(t *testing.T) {
+	now := time.Now()
+	selector := NewSessionAffinitySelector(&SoonestResetSelector{now: func() time.Time { return now }})
+	t.Cleanup(selector.Stop)
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Claude-Code-Session-Id": {"existing-session"}}}
+	const model = "claude-future-model"
+	early := claudeAuthResettingAt("early", now.Add(24*time.Hour), 0)
+	late := claudeAuthResettingAt("late", now.Add(72*time.Hour), 0)
+	assertPick := func(want string, candidates ...*Auth) {
+		t.Helper()
+		got, err := selector.Pick(context.Background(), "claude", model, opts, candidates)
+		if err != nil || got == nil || got.ID != want {
+			t.Fatalf("Pick() = %v, %v, want %s", got, err, want)
+		}
+	}
+	assertPick("late", late)
+	assertPick("early", late, early)
+	early.Quota.Exceeded = true
+	early.Quota.Reason = "credential_quota"
+	early.Quota.NextRecoverAt = now.Add(time.Hour)
+	assertPick("late", late, early)
+}
+
+func TestClaudeQuotaProbeRecoversOnlyCredentialCooldown(t *testing.T) {
+	const (
+		id           = "claude-probe-recovery"
+		blockedModel = "claude-with-separate-403"
+		model        = "claude-future-model"
+	)
+	now := time.Now().Truncate(time.Second)
+	resetAt := now.Add(48 * time.Hour)
+	quota := QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: resetAt.Add(5 * time.Second)}
+	for _, tc := range []struct {
+		name            string
+		observedAt      time.Time
+		probeReset      time.Time
+		shortWindowFull bool
+		wantRecovery    bool
+	}{
+		{name: "matching weekly window", observedAt: now, probeReset: resetAt, wantRecovery: true},
+		{name: "in-flight before the cooldown", observedAt: now.Add(-2 * time.Minute), probeReset: resetAt},
+		{name: "different window", observedAt: now, probeReset: resetAt.Add(-time.Hour)},
+		{name: "other window still exhausted", observedAt: now, probeReset: resetAt, shortWindowFull: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			modelHold := now.Add(time.Hour)
+			candidate := &Auth{
+				ID: id, Provider: "claude", Status: StatusError, Unavailable: true,
+				UpdatedAt: now.Add(-time.Minute), NextRetryAfter: quota.NextRecoverAt, Quota: quota,
+				ModelStates: map[string]*ModelState{
+					model: {Status: StatusError, Unavailable: true, NextRetryAfter: quota.NextRecoverAt, Quota: quota,
+						credentialQuotaPropagated: true},
+					blockedModel: {Status: StatusError, Unavailable: true, NextRetryAfter: quota.NextRecoverAt, Quota: quota,
+						credentialQuotaPropagated: true, credentialQuotaShadow: &ModelState{Status: StatusError,
+							Unavailable: true, NextRetryAfter: modelHold, LastError: &Error{HTTPStatus: http.StatusForbidden}}},
+				},
+			}
+			manager.auths[id] = candidate
+			probe := map[string]string{
+				QuotaSignalClaude7dStatus: "allowed", QuotaSignalClaude7dUtilization: "0.03",
+				QuotaSignalClaude7dReset: strconv.FormatInt(tc.probeReset.Unix(), 10),
+			}
+			if tc.shortWindowFull {
+				probe[QuotaSignalClaude5hStatus] = "rejected"
+			}
+			if !manager.ApplyQuotaProbeSignals(id, probe, tc.observedAt) {
+				t.Fatal("probe was not recorded")
+			}
+			got, _ := manager.GetByID(id)
+			blocked, _, _ := isAuthBlockedForModel(got, model, now)
+			if blocked == tc.wantRecovery {
+				t.Fatalf("model blocked = %v, want recovery = %v", blocked, tc.wantRecovery)
+			}
+			if tc.wantRecovery {
+				blocked, _, until := isAuthBlockedForModel(got, blockedModel, now)
+				if !blocked || !until.Equal(modelHold) {
+					t.Fatalf("independent 403 state: blocked=%v, deadline=%v, want %v", blocked, until, modelHold)
+				}
+			}
+		})
+	}
+}
 
 func claudeAuthResettingAt(id string, reset time.Time, priority int) *Auth {
 	auth := &Auth{ID: id, Provider: "claude"}
@@ -134,7 +219,7 @@ func TestSoonestResetSelectorPick_AllExhaustedReturnsCooldown(t *testing.T) {
 	}
 }
 
-func TestSoonestResetSelector_SessionAffinityKeepsBindingAndRebindsToSoonest(t *testing.T) {
+func TestSoonestResetSelector_SessionAffinityKeepsTiesAndRebindsToSoonest(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
@@ -145,6 +230,7 @@ func TestSoonestResetSelector_SessionAffinityKeepsBindingAndRebindsToSoonest(t *
 
 	late := claudeAuthResettingAt("late", now.Add(100*time.Hour), 0)
 	mid := claudeAuthResettingAt("mid", now.Add(10*time.Hour), 0)
+	tied := claudeAuthResettingAt("earlier-id", now.Add(10*time.Hour), 0)
 	soon := claudeAuthResettingAt("soon", now.Add(2*time.Hour), 0)
 	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_soonest-reset-uuid"}}`)
 	opts := cliproxyexecutor.Options{OriginalRequest: payload}
@@ -157,8 +243,8 @@ func TestSoonestResetSelector_SessionAffinityKeepsBindingAndRebindsToSoonest(t *
 		t.Fatalf("cold Pick() = %q, want mid", first.ID)
 	}
 
-	// A credential resetting even sooner appears; the bound session must stay put.
-	again, err := selector.Pick(context.Background(), "claude", "claude-x", opts, []*Auth{late, mid, soon})
+	// An equally ranked account does not move an established session.
+	again, err := selector.Pick(context.Background(), "claude", "claude-x", opts, []*Auth{late, mid, tied})
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
@@ -166,20 +252,26 @@ func TestSoonestResetSelector_SessionAffinityKeepsBindingAndRebindsToSoonest(t *
 		t.Fatalf("bound Pick() = %q, want mid", again.ID)
 	}
 
-	// The bound credential becomes unavailable; failover rebinds to the soonest reset.
-	failover, err := selector.Pick(context.Background(), "claude", "claude-x", opts, []*Auth{late, soon})
+	// A better reset makes the same session prefer the earlier account.
+	earlier, err := selector.Pick(context.Background(), "claude", "claude-x", opts, []*Auth{late, mid, soon})
+	if err != nil || earlier == nil || earlier.ID != "soon" {
+		t.Fatalf("earlier Pick() = %v, %v, want soon", earlier, err)
+	}
+
+	// The earlier account becomes unavailable, so the session fails over.
+	failover, err := selector.Pick(context.Background(), "claude", "claude-x", opts, []*Auth{late, mid})
 	if err != nil {
 		t.Fatalf("failover Pick() error = %v", err)
 	}
-	if failover.ID != "soon" {
-		t.Fatalf("failover Pick() = %q, want soon", failover.ID)
+	if failover.ID != "mid" {
+		t.Fatalf("failover Pick() = %q, want mid", failover.ID)
 	}
 	sticky, err := selector.Pick(context.Background(), "claude", "claude-x", opts, []*Auth{late, mid, soon})
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
 	if sticky.ID != "soon" {
-		t.Fatalf("post-failover Pick() = %q, want soon", sticky.ID)
+		t.Fatalf("recovered Pick() = %q, want soon", sticky.ID)
 	}
 }
 
