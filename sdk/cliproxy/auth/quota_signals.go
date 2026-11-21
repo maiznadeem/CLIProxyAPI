@@ -1,10 +1,14 @@
 package auth
 
 import (
+	"context"
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 const (
@@ -86,6 +90,32 @@ func applyCooldownFields(dst *QuotaState, cooldown QuotaState) {
 	dst.Reason = cooldown.Reason
 	dst.NextRecoverAt = cooldown.NextRecoverAt
 	dst.BackoffLevel = cooldown.BackoffLevel
+	dst.cooldownSignals = maps.Clone(cooldown.cooldownSignals)
+	dst.cooldownEvaluated = cooldown.Exceeded || cooldown.cooldownEvaluated
+}
+
+func rejectedClaudeSignalsForCooldown(provider string, headers http.Header) map[string]string {
+	if !strings.EqualFold(strings.TrimSpace(provider), "claude") {
+		return nil
+	}
+	signals := collectQuotaSignals("claude", headers)
+	if !hasRejectedClaudeUnifiedSignals(signals) {
+		return nil
+	}
+	return signals
+}
+
+func sanitizePersistedClaudeCooldownSignals(raw map[string]string) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	headers := make(http.Header, len(raw))
+	for key, val := range raw {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), "anthropic-ratelimit-unified-") {
+			headers.Set(key, val)
+		}
+	}
+	return rejectedClaudeSignalsForCooldown("claude", headers)
 }
 
 // collectQuotaSignals builds the bounded snapshot for a single response.
@@ -149,7 +179,8 @@ func validQuotaSignalValue(value string) bool {
 func quotaSignalRetentionRank(name string) int {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	switch {
-	case lower == "retry-after", strings.HasPrefix(lower, "anthropic-ratelimit-unified-"):
+	case lower == "retry-after", strings.HasPrefix(lower, "anthropic-ratelimit-unified-"),
+		strings.HasPrefix(lower, "x-usage-credits-"):
 		return 0
 	case lower == "x-codex-plan-type", lower == "x-codex-active-limit", strings.HasPrefix(lower, "x-codex-credits-"):
 		return 1
@@ -224,4 +255,117 @@ func mergeQuotaObservation(target, source QuotaState) QuotaState {
 	target.ObservedAt = source.ObservedAt
 	target.Signals = source.Clone().Signals
 	return target
+}
+
+// ApplyQuotaProbeSignals replaces a credential's passive quota snapshot with
+// signals gathered by an active quota probe. The snapshot is only replaced when
+// observedAt is not older than the current one, so a slow probe can never
+// overwrite fresher response-header observations. For Claude, a newer probe
+// confirming quota in the cooled-down window also releases the credential-wide
+// cooldown and updates routing. It reports whether the snapshot changed.
+func (m *Manager) ApplyQuotaProbeSignals(authID string, signals map[string]string, observedAt time.Time) bool {
+	if m == nil || authID == "" || len(signals) == 0 {
+		return false
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+	next := make(map[string]string, len(signals))
+	for key, value := range signals {
+		key = http.CanonicalHeaderKey(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+		if key == "" || !validQuotaSignalValue(value) || len(next) >= maxQuotaSignalHeaders {
+			continue
+		}
+		next[key] = value
+	}
+	if len(next) == 0 {
+		return false
+	}
+	m.mu.Lock()
+	auth := m.auths[authID]
+	if auth == nil || observedAt.Before(auth.Quota.ObservedAt) {
+		m.mu.Unlock()
+		return false
+	}
+	now := time.Now()
+	recovered := observedAt.After(auth.Quota.ObservedAt) &&
+		!observedAt.Before(auth.UpdatedAt) && !observedAt.After(now) &&
+		claudeProbeRestoresCredentialQuota(auth, next, now)
+	auth.Quota.Signals = next
+	auth.Quota.ObservedAt = observedAt
+	if !recovered {
+		m.mu.Unlock()
+		return true
+	}
+
+	restoreProbedClaudeQuota(auth, now)
+	snapshot := auth.Clone()
+	reg := registry.GetGlobalRegistry()
+	models, epoch := reg.GetModelsAndEpochForClient(authID)
+	persistCooldown := m.cooldownStore != nil
+	m.mu.Unlock()
+
+	if m.scheduler != nil {
+		m.scheduler.upsertAuthResult(snapshot, nil, true)
+	}
+	projections := make([]registry.ClientModelProjection, 0, len(models))
+	for _, model := range models {
+		if model != nil {
+			projections = append(projections, m.clientModelProjectionForAuth(snapshot, model.ID, now))
+		}
+	}
+	reg.ApplyClientModelProjections(authID, epoch, snapshot.Generation, projections)
+	if persistCooldown {
+		m.persistCooldownStates(context.Background())
+	}
+	return true
+}
+
+func claudeProbeRestoresCredentialQuota(auth *Auth, signals map[string]string, now time.Time) bool {
+	if !strings.EqualFold(auth.Provider, "claude") || auth.Disabled || auth.Status == StatusDisabled ||
+		hasUnauthorizedAuthFailure(auth) || !auth.Quota.Exceeded || auth.Quota.Reason != "credential_quota" ||
+		!auth.Quota.NextRecoverAt.After(now) || quotaExhaustedAt(&Auth{Quota: QuotaState{Signals: signals}}, now) {
+		return false
+	}
+	for _, window := range []struct{ status, reset string }{
+		{QuotaSignalClaude5hStatus, QuotaSignalClaude5hReset},
+		{QuotaSignalClaude7dStatus, QuotaSignalClaude7dReset},
+	} {
+		resetAt, ok := parseQuotaResetValue(signals[window.reset])
+		// The provider adds a small retry cushion to the inference deadline.
+		if ok && resetAt.After(now) && resetAt.Sub(auth.Quota.NextRecoverAt).Abs() <= time.Minute &&
+			strings.EqualFold(signals[window.status], "allowed") {
+			return true
+		}
+	}
+	return false
+}
+
+func restoreProbedClaudeQuota(auth *Auth, now time.Time) {
+	applyCooldownFields(&auth.Quota, QuotaState{})
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	auth.cooldownRecordedSeq = 0
+	for _, state := range auth.ModelStates {
+		if state == nil || (!state.credentialQuotaPropagated && state.Quota.Reason != "credential_quota") {
+			continue
+		}
+		if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
+			*state = *shadow.cloneShallow()
+			state.UpdatedAt = now
+			continue
+		}
+		resetModelState(state, now)
+	}
+	if len(auth.ModelStates) > 0 {
+		updateAggregatedAvailability(auth, now)
+	}
+	if !hasModelError(auth, now) {
+		auth.Status = StatusActive
+		auth.StatusMessage = ""
+		auth.LastError = nil
+	}
+	auth.Generation++
+	auth.UpdatedAt = now
 }

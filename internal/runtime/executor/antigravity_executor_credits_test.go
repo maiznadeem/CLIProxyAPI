@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -29,6 +29,7 @@ import (
 // may still be writing these maps when a test's cleanup runs. Replacing the
 // variable is an unsynchronized write and races with them; Clear is not.
 func resetAntigravityCreditsRetryState() {
+	antigravityTOSPauseUntil.Clear()
 	antigravityCreditsFailureByAuth.Clear()
 	antigravityShortCooldownByAuth.Clear()
 	antigravityCreditsBalanceByAuth.Clear()
@@ -629,7 +630,7 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	}
 	refreshDone := make(chan struct{})
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		return &http.Response{
@@ -697,7 +698,7 @@ func TestMaybeRefreshAntigravityCreditsHint_RefreshesExpiredHintAndRecoversCredi
 
 	var loadCodeAssistCalls int
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		loadCodeAssistCalls++
@@ -960,11 +961,14 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 		Attributes: map[string]string{"user_agent": configuredUserAgent},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		if got := req.Header.Get("User-Agent"); got != loadCodeAssistUserAgent {
 			t.Fatalf("User-Agent = %q, want %q", got, loadCodeAssistUserAgent)
+		}
+		if got := req.Header.Get("Accept"); got != "" {
+			t.Fatalf("Accept = %q, want omitted", got)
 		}
 		if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
 			t.Fatalf("X-Goog-Api-Client = %q, want empty", got)

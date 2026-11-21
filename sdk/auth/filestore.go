@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -305,7 +305,8 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 					return nil, errWeight
 				}
 				cliproxyauth.ApplyAuthPriorityMetadata(auth, metadata)
-				if _, inherited := auth.Attributes[cliproxyauth.AttributeFilePriority]; inherited {
+				routingApplied := cliproxyauth.ApplyAuthRoutingModeMetadata(auth, metadata)
+				if _, inherited := auth.Attributes[cliproxyauth.AttributeFilePriority]; inherited || routingApplied {
 					if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 						setter.SetMetadata(auth.Metadata)
 					}

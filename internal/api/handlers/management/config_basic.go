@@ -1,7 +1,6 @@
 package management
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -103,11 +103,12 @@ func WriteConfig(path string, data []byte) error {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return err
 	}
+	var commented []config.ArchivedV8Section
 	if len(doc.Content) > 0 && config.IsV8ConfigLayout(doc.Content[0]) {
-		var err error
-		data, _, err = config.NormalizeConfigLayout(data, true)
-		if err != nil {
-			return err
+		var errNorm error
+		data, _, commented, errNorm = config.NormalizeConfigLayoutSilent(data, true)
+		if errNorm != nil {
+			return errNorm
 		}
 	}
 	data = config.NormalizeCommentIndentation(data)
@@ -123,7 +124,11 @@ func WriteConfig(path string, data []byte) error {
 		_ = f.Close()
 		return errSync
 	}
-	return f.Close()
+	if errClose := f.Close(); errClose != nil {
+		return errClose
+	}
+	config.WarnUnrecognizedV8Sections(commented)
+	return nil
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {
@@ -318,6 +323,8 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 		return "weighted-round-robin", true
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
+	case "soonest-reset", "soonestreset", "sr":
+		return "soonest-reset", true
 	default:
 		return "", false
 	}

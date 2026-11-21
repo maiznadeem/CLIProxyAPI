@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -741,6 +742,9 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		if clone.MetadataModelID == "" {
 			clone.MetadataModelID = baseID
 		}
+		if clone.Name != "" {
+			clone.Name = rewriteModelInfoName(clone.Name, baseID, clone.ID)
+		}
 		clone.ExplicitThinking = model.ExplicitThinking
 		clone.ExplicitInputModalities = model.ExplicitInputModalities
 		addModel(&clone)
@@ -944,7 +948,33 @@ func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "google", "vertex", "vertex")
+	models := buildConfigModels(entry.Models, "google", "vertex", "vertex")
+	for _, info := range models {
+		for _, configured := range entry.Models {
+			name := strings.TrimSpace(configured.Name)
+			id := strings.TrimSpace(configured.Alias)
+			if id == "" {
+				id = name
+			}
+			if !strings.EqualFold(info.ID, id) {
+				continue
+			}
+			if publisher, model, ok := strings.Cut(helps.NormalizeVertexOpenAPIModel(name), "/"); ok && strings.TrimSpace(publisher) != "" && strings.TrimSpace(model) != "" && !strings.EqualFold(strings.TrimSpace(publisher), "google") {
+				info.OwnedBy = strings.TrimSpace(publisher)
+			}
+			openAPI := helps.IsVertexOpenAPIModel(name)
+			if configured.OpenAPI != nil {
+				openAPI = *configured.OpenAPI
+			} else if entry.OpenAPI != nil {
+				openAPI = *entry.OpenAPI
+			}
+			if openAPI && info.Thinking == nil {
+				info.Thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			}
+			break
+		}
+	}
+	return models
 }
 
 func appendVertexServiceAccountModels(cfg *config.Config, a *coreauth.Auth, baseModels []*ModelInfo) []*ModelInfo {
@@ -1025,7 +1055,7 @@ func appendVertexServiceAccountModels(cfg *config.Config, a *coreauth.Auth, base
 	out = append(out, baseModels...)
 	for _, name := range extraNames {
 		ownedBy := "google"
-		if publisher, _, ok := strings.Cut(name, "/"); ok && strings.TrimSpace(publisher) != "" {
+		if publisher, _, ok := strings.Cut(helps.NormalizeVertexOpenAPIModel(name), "/"); ok && strings.TrimSpace(publisher) != "" {
 			ownedBy = strings.TrimSpace(publisher)
 		}
 		info := &ModelInfo{
@@ -1137,7 +1167,7 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 	if oldID == "" || newID == "" {
 		return name
 	}
-	if strings.EqualFold(oldID, newID) {
+	if oldID == newID {
 		return name
 	}
 	if strings.EqualFold(trimmed, oldID) {
@@ -1219,7 +1249,7 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		if name == "" || alias == "" {
 			continue
 		}
-		if strings.EqualFold(name, alias) {
+		if name == alias {
 			continue
 		}
 		key := strings.ToLower(name)
@@ -1246,10 +1276,10 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		key := strings.ToLower(id)
 		entries := forward[key]
 		if len(entries) == 0 {
-			if _, exists := seen[key]; exists {
+			if _, exists := seen[id]; exists {
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[id] = struct{}{}
 			out = append(out, model)
 			continue
 		}
@@ -1262,8 +1292,8 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			}
 		}
 		if keepOriginal {
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
+			if _, exists := seen[id]; !exists {
+				seen[id] = struct{}{}
 				out = append(out, model)
 			}
 		}
@@ -1274,14 +1304,13 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			if mappedID == "" {
 				continue
 			}
-			if strings.EqualFold(mappedID, id) {
+			if mappedID == id {
 				continue
 			}
-			aliasKey := strings.ToLower(mappedID)
-			if _, exists := seen[aliasKey]; exists {
+			if _, exists := seen[mappedID]; exists {
 				continue
 			}
-			seen[aliasKey] = struct{}{}
+			seen[mappedID] = struct{}{}
 			clone := cloneModelInfoForCatalogRoute(model)
 			clone.ID = mappedID
 			if model.MetadataModelID != "" {
@@ -1302,10 +1331,10 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		}
 
 		if !keepOriginal && !addedAlias {
-			if _, exists := seen[key]; exists {
+			if _, exists := seen[id]; exists {
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[id] = struct{}{}
 			out = append(out, model)
 		}
 	}
